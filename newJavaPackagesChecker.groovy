@@ -8,31 +8,39 @@ import java.io.File
 import java.lang.Object
 import groovy.transform.Field
 
-
+/*
+    based upon the review meeting, need to modify the original work: remove original_ownership.csv, compare with the previous build
+    BinyanZ, so this is version 1.2
+ */
 @Field credentialIDGithub = 'github-fetch-user'
 @Field credentialIDGit = '15014aaf-2fd4-4192-83f6-f57b2cb5ed90'
 @Field urlGithub = 'git@github.wdf.sap.corp:'
 @Field urlGit = 'ssh://fpajenkins@git.wdf.sap.corp:29418/'
-@Field NEWPACKAGE_EMAIL_FLAG = 0 // TODO: might send diffent emails to different people
-@Field MISSPROPERTY_EMAIL_FLAG = 0
-@Field EMAIL_FLAG = 0
-@Field NEW_PACKAGES = 0 //FLAG FOR NEW PACAKAGES
-@Field CSVPACKAGE = "Package" //CSV FIRST LINE
+@Field NEW_PACKAGES = 0 //FLAG FOR NEW PACAKAGES and email
+//First line of file:
+@Field CSVPACKAGE = "Package"
 @Field CSVOWNER = "Owner"
 @Field CSVJIRAID = "JiraID"
 @Field CSVPROJECT = "Project"
 @Field CSVCOMMENT = "Comment"
+@Field contactEmailList = []
+@Field uploadedFile = "uploadedPackageOwnerList.csv"
 node {
-    // can only use "" to include ${}
     stage "Checkout"
     //needs to clean up workspace before building
     cleanWs()
-    theDir = new File(env.WORKSPACE)
-
-    println theDir.exists() // false (slave node)
     def exists = fileExists 'bocServiceDirectoryRepo'
     if (!exists){
         new File('bocServiceDirectoryRepo').mkdir()
+    }
+
+    try {
+        step($class: 'hudson.plugins.copyartifact.CopyArtifact', projectName: 'New Java Package Checker (TEST)', filter:'output/*_ownershipList.csv', selector: [$class: 'StatusBuildSelector', stable: false])
+        echo '[Info] copy artifacts from the previous build'
+    } catch (none) {
+        echo '[Info] No artifacts to copy from previous build'
+        //generate output for artifacts:
+        sh "mkdir -p output"
     }
     //checkout bocServiceDirectory Repo to get serviceList.json
     dir('bocServiceDirectoryRepo'){
@@ -51,32 +59,43 @@ node {
             serviceMetaUrl = service.get('metaDataUrl')
             serviceLinkType = service.get('linkType')
         } else { // service info not complete, skip
+            echo "[Warning]: Info for service ${service} is not sufficient in boc_service_directory, please check the service.json file."
             continue
         }
-
         pullRepo(serviceRepoName, serviceRepoUrl, serviceLinkType)
-        if (serviceRepoName == 'TMS'){ //delete this in production
-            writeOriginalOwnershipFile()
-        }
         genOwnershipFile(serviceRepoName, serviceMetaUrl)
     }
 
     stage "Send Email"
-    if(EMAIL_FLAG){
+    if(NEW_PACKAGES){
+        echo('[Info] enter into send email and generate email list')
         sendEmail()
     }
 
     stage "Build Artifacts"
-    //might need to merge .csv files to one file
-    sh'cat output/*_ownershipList.csv > output/packageOwnershipList.csv'
     def csvFirstLine = ([CSVPACKAGE, CSVOWNER, CSVJIRAID, CSVPROJECT, CSVCOMMENT].join(",")) + "\n"
-    sh 'sed -i \'1i' + csvFirstLine + '\' output/packageOwnershipList.csv'
-    archiveArtifacts artifacts: 'output/*', excludes: 'output/*.md'
+    sh('ls output > tempListFile.csv')
+    def filesList = readFile( "tempListFile.csv" ).split( "\\r?\\n" )
+    print filesList
+    sh "rm -f tempListFile.csv"
+    def i
+    for(i=0;i < filesList.size();i++){
+        def fileName = 'output/' + filesList[i]
+        def tempFileListFirst = (readFile(fileName).split("\\r?\\n"))[0]
+        print tempFileListFirst
+        if (tempFileListFirst + "\n" == csvFirstLine){
+            echo "the title line of ${fileName} is found, skip"
+        }else{
+            sh 'sed -i \'1i' + csvFirstLine + '\' ' + fileName
+        }
+        //TODO:
+        //if ( sh('grep -q \'Package,Owner,\' <<< $(head -n 1 outpu(/' + fileName + ')') )
+    }
+    archiveArtifacts artifacts: 'output/*'
 
     stage "Set Build Status"
-    //check if newPackageList.csv exists or not, if exists, make the build UNSTABLE
+    //check if newPackageList.csv exists or not, make the build UNSTABLE
     if(NEW_PACKAGES){
-        //sh 'exit 1'
         currentBuild.result = 'UNSTABLE'
     }
 }
@@ -95,89 +114,113 @@ def pullRepo(serviceRepoName, serviceRepoUrl, serviceLinkType){
         git changelog: false, url: gitUrlBase + serviceRepoUrl, credentialsId: gitCreID
     }
     // generate latestPackageList.txt for each service
-    sh('find ' + serviceRepoName + '/src/main -type d > ' + serviceRepoName + '/latestPackageList.csv') //TODO: need to check which folder should be updated, under main/src ?
+    sh('find ' + serviceRepoName + '/src/main -type d > ' + serviceRepoName + '/latestPackageList.csv')
 }
 
-def writeOriginalOwnershipFile(){ //this is for test, will delete in production
-    //=========================================================================
-    // write original_ownership.json file to the folder to test (don't need this in production):
-    String jsonString = '''[{\"Package\":\"TMS/src/main\", \"Owner\":\"Binyan\", \"JiraID\":\"FPA43\", \"Project\": \"\", \"Comment\":\"\"},{\"Package\":\"TMS/src/main/resources/com\", \"Owner\":\"Brian Chen\", \"JiraID\":\"FPA43\", \"Project\": \"\", \"Comment\":\"\"}]'''
-    writeFile file: 'TMS/original_ownership.json', text: jsonString
-    //=========================================================================
-}
 
 def genOwnershipFile(serviceRepoName, serviceMetaUrl) {
-    //generate list of latest Packages per service
-    def latestPackageList = readFile("${serviceRepoName}/latestPackageList.csv").split("\\r?\\n")
-    def csvString = ""
+    // Get file using input step temporarily, the file will be located in build directory (TODO: there is a bug for file parameter in pipeline, will change to file parameter in the future.)
+    if (serviceName && serviceName == serviceRepoName){
+        def inputFile = input message: 'Upload file here', parameters: [file(name: uploadedFile)]
+        // Read contents and write to workspace
+        echo "[Info] ${inputFile}"
+        writeFile(file: uploadedFile, text: inputFile.readToString())
 
-    def newPackageList = [:]
-    def fileExists = fileExists "${serviceRepoName}/original_ownership.json" //TODO: the file name should be this?
-    if (fileExists) {
-        echo("original ownership file exist")
-        def originalOwnershipString = readFile "${serviceRepoName}/original_ownership.json"
-        print originalOwnershipString
-        def tempOwnershipDic= new JsonSlurperClassic().parseText(originalOwnershipString) //here the order is different
-        print tempOwnershipDic
-        // pre-operation for originalOwnershipList:
-        def originalOwnershipDic = [:]
-        for (def item in tempOwnershipDic) {
-            def newKey = item.get(CSVPACKAGE)
-            item.remove(CSVPACKAGE)
-            originalOwnershipDic[newKey] = item
+        def uploadFileExists = fileExists uploadedFile //the uploaded file's name is changed to: uploadedOwnershipList.csv, and this file should be under workspace. original name should be xxx_uploadedOwnershipList.csv
+        if (uploadFileExists) {
+            echo "[Info] ${uploadedFile} will be used to compare with latestPackageList.csv."
+            //get original file name:
+            //def serviceNameInFile = (${uploadedPackageOwnerList.csv}.split('_'))[0] //exception handling, TODO: this will be used later when file parametr in pipeline is fixed
+            //replace the file, and the file name changed to the latter one. Second file don't need to be in the folder
+            sh('mv ' + uploadedFile + ' output/' + serviceName + '_ownershipList.csv')
         }
-        // compare with latestPackageList
-        for (def tempPackageKey in latestPackageList) {
-            if (originalOwnershipDic.containsKey(tempPackageKey)) { //TODO: the value of "Package" might be multiple
-                def packageValue = originalOwnershipDic.get(tempPackageKey)
-                print packageValue
-                // re-order the json obj to write to csv file:
-                def tempList = []
-                tempList.add(packageValue.get(CSVOWNER))
-                tempList.add(packageValue.get(CSVJIRAID))
-                tempList.add(packageValue.get(CSVPROJECT))
-                tempList.add(packageValue.get(CSVCOMMENT))
-                csvString = csvString + (tempList.plus(0, tempPackageKey)).join(",") + "\n"
-            } else {// new package detected
-                NEW_PACKAGES = 1
-                EMAIL_FLAG = 1
-                newPackageList[tempPackageKey] = null
-            }
-        }
-        print csvString
-    } else { // find default owner in serviceMetadata.json in serviceList.json
-        echo("original ownership file doesn't exist")
-        EMAIL_FLAG = 1
-        def serviceMetaDataString = readFile "bocServiceDirectoryRepo${serviceMetaUrl}"
-        def serviceMetaDataList = new JsonSlurperClassic().parseText(serviceMetaDataString)
-        def contactList = (serviceMetaDataList.get("contact"))
-        def owner = contactList[0].get("name")
-        def contactEmail = contactList[0].get("email") // TODO: might use this in the future
-        // write owner as the default owner to latestPackageDic: JiraID, Project, Comment are all empty
-        def jsonObj = [CSVOWNER: owner, CSVJIRAID:"FPA43", CSVPROJECT: "Orca", CSVCOMMENT: ""]
-        print "Value of jsonObj is: ${jsonObj}"
-        //generate csv string
-        for (def tempPackageKey in latestPackageList) {
-            def packageValue = jsonObj
-            def tempValueList = packageValue.values() as List
-            csvString = csvString + (tempValueList.plus(0,tempPackageKey)).join(",") + "\n"
-        }
-        print csvString
     }
 
-    sh "mkdir -p output"
-    // merge csv files to one:
-    writeFile file: "output/${serviceRepoName}_ownershipList.csv", text: csvString
-    if (NEW_PACKAGES && !newPackageList.isEmpty){
-        def newPackageString = (newPackageList.keySet() as List).join("\n")
-        writeFile file: "output/${serviceRepoName}_newPacList.csv", text: newPackageString
+
+    def latestPackageList = readFile("${serviceRepoName}/latestPackageList.csv").split("\\r?\\n")
+    def contactList = genDefaultContactList(serviceMetaUrl)
+    if (contactList.empty){ //skip this service
+        echo "[Warning] contactList for ${serviceRepoName} is empty, please check the metadata file"
+        return
+    }
+    def owner, contactEmail
+    try{
+        owner = contactList[0].get("name")
+        contactEmail = contactList[0].get("email")
+    }catch(Exception e){ //skip this service
+        echo "[Warning] The default owner or email info is not complete in metadata file: ${e}."
+        return
+    }
+
+    def tempValueList = genDefaultOwnerList(owner)
+    def ownershipFileExists = fileExists "output/${serviceRepoName}_ownershipList.csv"
+    for (def i = 0; i< latestPackageList.size(); i++) { //avoid NoSerialization exception here, use old c loop
+        packageItem = latestPackageList[i]
+        if(ownershipFileExists){
+            echo '[Info] ownershipList file exists and will go to compareWithFile function'
+            if(compareWithFile(serviceRepoName, packageItem)){
+                echo '[Info] ${packageItem} has owner, skip'
+            }else{
+                echo '[Info] ${packageItem} has no owner, will update with the default owner'
+                addToFile(serviceRepoName, tempValueList, packageItem)
+            }
+        } else { //initial build or new service with no uploaded ownership file
+            echo '[Info] ownershipList file does not exists and will go to addToFile function'
+            addToFile(serviceRepoName, tempValueList, packageItem)
+        }
+    }
+    if(NEW_PACKAGES){
+        contactEmailList.add(contactEmail)
+        echo "[Info] contactEmailList is: ${contactEmailList}"
     }
 }
 
 def sendEmail(){
-    mail (  to: 'binyan.zhao@sap.com', // TODO: who will be the receiver? contactEmail or FPA39
+    contactEmailString = contactEmailList.join(',')
+    print "[Info] Contact Email List is ${contactEmailString}"
+    mail (  to: 'binyan.zhao@sap.com', //should be "${contactEmailString}"
             subject: "Job '${env.JOB_NAME}' (${env.BUILD_NUMBER}) detects new JAVA pacakges",
-            body: "Please go to ${env.BUILD_URL}, which detects new packages that don't have owner or the original ownership file doesn't exist."
+            body: "Please go to ${env.BUILD_URL}, which detects new packages that don't have owner for your service, with default owner updated. If there is anything you need to change, please go to: xxx wiki page for reference. "
     )
+    echo '[Info] Email is send.'
+}
 
+//check if packageItem is included in the ownershipList file
+def compareWithFile(serviceRepoName, packageItem ){
+    def tempFileString = readFile "output/" + serviceRepoName + '_ownershipList.csv'
+    def tempFileList = tempFileString.split("\r?\n")
+    for(def fileOwnerValue in tempFileList){
+        if((fileOwnerValue.split(','))[0] == packageItem ){
+            return true
+        }
+    }
+    return false
+    // TODO:
+    //if (sh('grep -q ^' + packageItem + ',$ output/' + serviceRepoName + '_ownershipList.csv' ))
+}
+
+def addToFile(serviceRepoName, tempValueList, packageItem){
+    NEW_PACKAGES = 1
+    csvString = (tempValueList.plus(0,packageItem)).join(",")
+    sh('echo ' + csvString + ' >> output/' + serviceRepoName + '_ownershipList.csv')
+    sh('echo ' + packageItem + ' >> output/' + serviceRepoName + '_newPackageList.csv' )
+}
+
+def genDefaultContactList(serviceMetaUrl){
+    def contactList = []
+    try{
+        def serviceMetaDataString = readFile "bocServiceDirectoryRepo${serviceMetaUrl}"
+        def serviceMetaDataList = new JsonSlurperClassic().parseText(serviceMetaDataString)
+        contactList = (serviceMetaDataList.get("contact"))
+    }catch(Exception e){ //will skip to continue to do operations on next service
+        echo "[Warning] The metadata file for service ${serviceMetaUrl} is unsufficient: ${e}."
+    }
+    return contactList
+}
+
+def genDefaultOwnerList(owner){
+    def jsonObj = [CSVOWNER: owner, CSVJIRAID:"", CSVPROJECT:"", CSVCOMMENT:""]
+    def packageValue = jsonObj
+    def tempValueList = packageValue.values() as List
+    return tempValueList
 }
