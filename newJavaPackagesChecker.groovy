@@ -69,6 +69,7 @@ node {
             echo " [Warning] The repo info for ${serviceRepoName} is not correct ${e}, please check the service.json file. "
         }
         if (!REPO_FLAG){
+            mvUploadedFile(serviceRepoName)
             genOwnershipFile(serviceRepoName, serviceMetaUrl)
         }
     }
@@ -134,8 +135,7 @@ def pullRepo(serviceRepoName, serviceRepoUrl, serviceLinkType){
     sh('find ' + serviceRepoName + '/src/main -type d > ' + serviceRepoName + '/latestPackageList.csv')
 }
 
-
-def genOwnershipFile(serviceRepoName, serviceMetaUrl) {
+def mvUploadedFile(serviceRepoName){
     // Get file using input step temporarily, the file will be located in build directory. TODO: there is a bug for file parameter in pipeline, will change to file parameter in the future.)
     if (serviceName && serviceName == serviceRepoName){
         def inputFile = input message: 'Upload file here', parameters: [file(name: uploadedFile)]
@@ -147,6 +147,8 @@ def genOwnershipFile(serviceRepoName, serviceMetaUrl) {
             sh('mv ' + uploadedFile + ' output/' + serviceName + '_ownershipList.csv')
         }
     }
+}
+def genOwnershipFile(serviceRepoName, serviceMetaUrl) {
     def latestPackageList = readFile("${serviceRepoName}/latestPackageList.csv").split("\\r?\\n")
     def contactList = genDefaultContactList(serviceMetaUrl)
     if (contactList.empty){ //skip this service
