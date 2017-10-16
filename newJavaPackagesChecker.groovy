@@ -151,16 +151,17 @@ def mvUploadedFile(serviceRepoName){
 def genOwnershipFile(serviceRepoName, serviceMetaUrl) {
     def latestPackageList = readFile("${serviceRepoName}/latestPackageList.csv").split("\\r?\\n")
     def contactList = genDefaultContactList(serviceMetaUrl)
-    if (contactList.empty){ //skip this service
+    if (contactList == null){ //skip this service
         echo " [Warning] contactList for ${serviceRepoName} is empty, please check the metadata file. "
         return
     }
-    def owner, contactEmail
-    try{
-        owner = contactList[0].get("name")
-        contactEmail = contactList[0].get("email")
-    }catch(Exception e){ //skip this service
-        echo " [Warning] The default owner or email info is not complete in metadata file: ${e}. "
+
+    def owner = contactList[0].get("name")
+    print owner
+    def contactEmail = contactList[0].get("email")
+    print contactEmail
+    if(owner == null || contactEmail == null){//try...catch can't be used here cuz no exceptions if there is no "key": name or email.
+        echo " [Warning] The default owner or email info is not complete in metadata file. "
         return
     }
 
